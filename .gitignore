@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.pem
+test-results/
+playwright-report/
+
+# Coverage output — generated, never committed
+coverage/

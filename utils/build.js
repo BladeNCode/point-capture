@@ -1,0 +1,119 @@
+import { createHash } from 'crypto';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, cpSync, existsSync, readdirSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath, pathToFileURL } from 'url';
+import * as esbuild from 'esbuild';
+
+const root      = join(dirname(fileURLToPath(import.meta.url)), '..');
+// OUT_DIR lets a test build into an isolated directory instead of the shared
+// dist/ a running webServer may be serving from — never set for a real deploy.
+const dist      = join(root, process.env.OUT_DIR ?? 'dist');
+const BASE_PATH = process.env.BASE_PATH ?? '/';
+
+rmSync(dist, { recursive: true, force: true });
+mkdirSync(dist, { recursive: true });
+
+const { version } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+
+function contentHash(content) {
+  return createHash('sha256').update(content).digest('hex').slice(0, 8);
+}
+
+// 1. Bundle + minify app/main.js — all _lib/ imports resolved, tree-shaken
+const { outputFiles } = await esbuild.build({
+  entryPoints: [join(root, 'app', 'main.js')],
+  bundle:      true,
+  minify:      true,
+  sourcemap:   true,
+  format:      'esm',
+  define:      { __APP_VERSION__: `"${version}"`, __BASE_PATH__: JSON.stringify(BASE_PATH) },
+  // Depth-independent specifier for the library, so app code and shared code kept
+  // outside the app tree can import 'socle/core/...' without encoding their own
+  // position relative to _lib/. Absolute because esbuild anchors relative alias
+  // targets to the CWD, not to this file.
+  alias:       { socle: join(root, '_lib') },
+  outdir:      dist,
+  write:       false,
+});
+
+const jsFile  = outputFiles.find(f => !f.path.endsWith('.map'));
+const mapFile = outputFiles.find(f =>  f.path.endsWith('.map'));
+
+const mainHash     = contentHash(jsFile.text);
+const mainFilename = `main.${mainHash}.js`;
+const jsContent    = jsFile.text.replace(
+  /\/\/# sourceMappingURL=.*$/m,
+  `//# sourceMappingURL=${mainFilename}.map`
+);
+
+writeFileSync(join(dist, mainFilename), jsContent);
+if (mapFile) writeFileSync(join(dist, `${mainFilename}.map`), mapFile.text);
+
+// 2. SW — compute CACHE_VERSION from all significant content
+const swSrc         = readFileSync(join(root, '_lib', 'core', 'sw.js'), 'utf8');
+const tokensContent = readFileSync(join(root, '_lib', 'core', 'styles', 'tokens.css'), 'utf8');
+const manifestSrc   = readFileSync(join(root, 'manifest.json'), 'utf8');
+const indexSrc      = readFileSync(join(root, 'index.html'), 'utf8');
+
+// app/sw-extensions.js is the app-level SW extension point (mirrors
+// extra-assets.js for the asset list) — optional, no-op when absent.
+// Appended as a plain classic script since dist/sw.js has no `type: module`,
+// so it must be dependency-free plain JS, no import/export.
+const swExtensionsPath = join(root, 'app', 'sw-extensions.js');
+const swExtensions     = existsSync(swExtensionsPath) ? readFileSync(swExtensionsPath, 'utf8') : '';
+
+const cacheHash = contentHash(jsContent + tokensContent + manifestSrc + indexSrc + swExtensions);
+
+// Asset list — bundle + manifest + icons (no _lib/ or app/ module files)
+const iconDir = join(root, 'app', 'icons');
+const assets  = [BASE_PATH, `${BASE_PATH}${mainFilename}`, `${BASE_PATH}manifest.json`];
+if (existsSync(iconDir)) {
+  for (const f of readdirSync(iconDir)) assets.push(`${BASE_PATH}app/icons/${f}`);
+}
+
+// utils/extra-assets.js is deliberately outside the scaffold template — socle update
+// replaces _lib/ and utils/build.js but never touches other files in utils/, so
+// app-specific build extensions go there and survive library updates unchanged.
+const { extraAssetDirs = [] } = await import(pathToFileURL(join(root, 'utils', 'extra-assets.js')).href).catch(() => ({}));
+for (const rel of extraAssetDirs) {
+  const srcDir = join(root, rel);
+  if (!existsSync(srcDir)) continue;
+  for (const f of readdirSync(srcDir)) assets.push(`${BASE_PATH}${rel}/${f}`);
+  cpSync(srcDir, join(dist, rel), { recursive: true });
+}
+
+writeFileSync(join(dist, 'sw.js'), swSrc
+  .replace('%%CACHE_VERSION%%', `${version}-${cacheHash}`)
+  .replace('%%ASSETS%%',        JSON.stringify(assets))
+  .replace('%%BASE_PATH%%',     BASE_PATH)
+  + (swExtensions ? `\n${swExtensions}` : ''));
+
+// 3. version.json — written after the cache hash exists so it can carry buildHash
+writeFileSync(
+  join(dist, 'version.json'),
+  JSON.stringify({ version, buildTime: new Date().toISOString(), buildHash: cacheHash }, null, 2)
+);
+
+// 4. index.html — inline tokens.css, inject hashed main.js, substitute BASE_PATH tokens
+const indexHtml = indexSrc
+  .replace('<link rel="stylesheet" href="_lib/core/styles/tokens.css" />', `<style>\n${tokensContent}\n</style>`)
+  .replace('%%MAIN_JS%%', `${BASE_PATH}${mainFilename}`)
+  .replaceAll('%%BASE_PATH%%', BASE_PATH);
+writeFileSync(join(dist, 'index.html'), indexHtml);
+// 404.html = index.html so static hosts (GitHub Pages) serve the app for deep
+// links on uncontrolled navigations; the client router takes over from there.
+writeFileSync(join(dist, '404.html'), indexHtml);
+
+// 5. manifest.json (BASE_PATH substitution for scaffolded apps)
+writeFileSync(join(dist, 'manifest.json'), manifestSrc.replaceAll('%%BASE_PATH%%', BASE_PATH));
+
+// 6. Copy app/icons/ — referenced by manifest
+if (existsSync(iconDir)) cpSync(iconDir, join(dist, 'app', 'icons'), { recursive: true });
+
+console.log(`Built ${version} (base: ${BASE_PATH}) → ${process.env.OUT_DIR ?? 'dist'}/`);
+console.log(`  ${mainFilename} (${(jsContent.length / 1024).toFixed(1)} KB)`);
+if (mapFile) console.log(`  ${mainFilename}.map`);
+console.log(`  sw.js (cache: ${version}-${cacheHash})`);
+console.log(`  version.json`);
+console.log(`  index.html`);
+console.log(`  404.html`);

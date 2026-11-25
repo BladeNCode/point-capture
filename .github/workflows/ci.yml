@@ -1,0 +1,88 @@
+name: CI
+
+# Gate. deploy.yml calls this via `needs: test`, so the two cannot drift.
+#
+# `submodules: true` is the whole trick. app/shared is a git submodule pointing
+# at BladeNCode/fencing-shared, so one checkout materialises both the app and
+# the shared components as real files — no second checkout, no relative-path
+# juggling, no token. Both repos are public, so the default GITHUB_TOKEN is
+# enough.
+#
+# This replaced a two-checkout workaround that existed because app/shared used
+# to be a committed symlink. A symlink is stored in git as its literal target
+# path, so a lone clone left it dangling and nothing could resolve the shared
+# components at all.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+jobs:
+  test:
+    # PINNED, not ubuntu-latest. ubuntu-latest became Ubuntu 26.04, which
+    # Playwright 1.60.0 cannot install browsers for — CI's first real run died
+    # on "Playwright does not support chromium on ubuntu26.04-x64".
+    #
+    # The obvious fix, upgrading Playwright, is closed to us: 1.65.1 supports
+    # 26.04 but has DROPPED macOS 13, which is the development machine. So the
+    # version that fixes CI is the version that cannot run locally, and a
+    # matching local/CI pair only exists on an older OS. Hence the pin on both
+    # sides: @playwright/test is held at exactly 1.60.0 (not a caret range)
+    # and the runner is held at the newest Ubuntu that version supports.
+    #
+    # Revisit when the dev machine moves past macOS 13, not before. Bumping
+    # either half alone breaks the other.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: actions/setup-node@v4
+        with:
+          # 22 rather than 20: development runs on 26, and testing two majors
+          # below that invites failures nobody can reproduce locally.
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Confirm the submodule checked out
+        # Fails here with one clear line instead of forty esbuild
+        # "could not resolve" errors further down.
+        run: |
+          test -f app/shared/schema/bout.js \
+            || { echo "::error::app/shared is empty — the submodule did not check out"; exit 1; }
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Unit tests
+        # Includes the shared components' own tests via the
+        # app/shared/**/*.test.js glob, so they run against THIS app's Socle
+        # version. Deliberate: library drift surfaces at the consumer.
+        run: npx vitest run
+
+      - name: Report the Socle version under test
+        # Printed so a shared-test failure that appears in one app and not
+        # another reads as version skew on sight, not as an investigation.
+        run: node -e "console.log('Socle', require('./_lib/lib-version.json').version)"
+
+      - name: Build
+        run: npm run build
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end tests
+        run: npx playwright test
+
+      - name: Upload the Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

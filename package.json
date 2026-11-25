@@ -1,0 +1,25 @@
+{
+  "name": "point-capture",
+  "version": "0.2.0",
+  "type": "module",
+  "scripts": {
+    "build": "node utils/build.js",
+    "serve": "npx serve dist --listen 3003 --single",
+    "dev": "node utils/build.js && npx serve dist --listen 3003 --single",
+    "test": "eslint . && vitest run && playwright test",
+    "test:unit": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "dev:https": "node utils/build.js && npx serve dist --listen tcp://0.0.0.0:3003 --single --ssl-cert local.pem --ssl-key local-key.pem",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@playwright/test": "1.60.0",
+    "@vitest/coverage-v8": "^4.1.12",
+    "esbuild": "^0.28.1",
+    "eslint": "^9.39.5",
+    "fake-indexeddb": "^6.2.5",
+    "happy-dom": "^20.9.0",
+    "vitest": "^4.1.0"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "version": "1.7.3",
+  "modules": [
+    "core",
+    "gestures",
+    "sync",
+    "app-header",
+    "modal-dialog",
+    "toast"
+  ],
+  "store": "event-log",
+  "scaffolded": "2026-09-13"
+}
